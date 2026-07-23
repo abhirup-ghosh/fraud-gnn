@@ -12,7 +12,8 @@ arises, then keep building). Each entry: what, why it helps, and which `plan.md`
 
 | Idea | Why it helps | Related plan stage | Added on |
 |------|--------------|--------------------|----------|
-| _(none yet)_ | | | |
+| Root-cause the `uv`/`_virtualenv.pth` `sys.path` flakiness properly (or recreate `.venv` without the `virtualenv`-style patch) instead of the `conftest.py`/`PYTHONPATH=src` workaround | Removes an occasional `ModuleNotFoundError` gotcha for anyone re-running commands outside the eventual Makefile | §S4 (env tooling) | 2026-07-24 |
+| Investigate why `SAGEConv` scatter-reduce is non-deterministic on PyTorch's MPS backend (file an upstream issue / retest on a future PyTorch release) and re-enable MPS training if fixed | Would restore GPU-accelerated training on the M3 without sacrificing reproducibility | §S4 (`train.py`) | 2026-07-24 |
 
 ---
 
