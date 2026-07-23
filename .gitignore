@@ -1,4 +1,22 @@
-venv
-lib
-*.csv
-*.pkl
+# data (large, licensed — do not commit)
+data/
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.python-version
+
+# artifacts produced by training
+artifacts/
+
+# jupyter
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# keep committed:
+#   notebooks/01_eda.ipynb, plan.md, reports/**, src/**, docker/**, tests/**

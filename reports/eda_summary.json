@@ -1,0 +1,23 @@
+{
+  "n_nodes": 203769,
+  "n_edges": 234355,
+  "pct_illicit_all": 2.23,
+  "pct_labeled": 22.85,
+  "pct_illicit_of_labeled": 9.76,
+  "edges_intra_timestep_frac": 1.0,
+  "n_components": 49,
+  "rf_roc_auc": 0.939,
+  "rf_pr_auc": 0.798,
+  "rf_f1": 0.804,
+  "top_features": [
+    "feat_53",
+    "feat_55",
+    "feat_89",
+    "feat_90",
+    "feat_91",
+    "feat_52",
+    "feat_150",
+    "feat_54"
+  ],
+  "drift_after_step": 43
+}
