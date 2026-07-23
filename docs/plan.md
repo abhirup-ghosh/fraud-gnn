@@ -22,6 +22,12 @@ here.
    [`docs/followup.md`](followup.md) and keep building the current stage as written. If something is
    explicitly not wanted, add it to *Out of scope* there.
 5. All commands are run from the repository root with the `uv` environment active.
+6. **Commit & push at the end of every session**, not just every stage. If a session ends mid-stage
+   (interrupted, paused, or stopped by the user) with work that doesn't yet meet that stage's
+   acceptance criteria, commit and push it anyway — never leave uncommitted work sitting locally
+   between sessions. Use a WIP-style message (e.g. `Phase2 S5 WIP: <what's done so far>`) instead of
+   the stage's normal commit message, and finish with the stage's real commit once the acceptance
+   criteria pass.
 
 ---
 
