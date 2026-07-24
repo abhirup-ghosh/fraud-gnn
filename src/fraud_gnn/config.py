@@ -30,7 +30,7 @@ VAL_FRACTION = 0.15  # random stratified slice carved out of train, NOT temporal
 
 # GraphSAGE hyperparameters (§S2)
 HIDDEN = 128
-DROPOUT = 0.4
+DROPOUT = 0.3
 LR = 5e-3
 WEIGHT_DECAY = 5e-4
 EPOCHS = 300
