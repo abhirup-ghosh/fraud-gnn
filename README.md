@@ -332,6 +332,19 @@ the fully containerised stack produced:
 The drift gauge crossing its alert threshold during the deliberately drift-inducing phase of this
 test confirms the monitor detects, live, the exact failure mode identified analytically in §3 and §5.
 
+**Dashboard, captured live during the load test above:**
+
+<p align="center">
+  <img src="reports/figures/grafana_dashboard.png" alt="Grafana dashboard showing the request-rate spike, prediction volume, the concept-drift score crossing its alert threshold, and rolling precision/recall/F1 from live feedback" width="100%">
+</p>
+
+All four rows are populated from real traffic against the running stack, not placeholder data: the
+request-rate and prediction-volume spikes correspond to the 5,000-request load test; the Concept
+Drift row shows `fraud_drift_psi` rising from ~0 to 0.86 as the drift-inducing phase begins,
+crossing both the moderate (yellow, 0.10) and significant (red, 0.25) threshold lines; and Model
+Performance shows rolling precision (0.667), recall (0.80), and F1 (0.727) computed from 60
+`/feedback` submissions scored against real ground-truth labels.
+
 ---
 
 ## 7. Quickstart
