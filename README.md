@@ -1,7 +1,7 @@
 # Fraud-GNN — Graph Neural Network Fraud Detection on the Elliptic Bitcoin Dataset
 
 <p align="center">
-  <img src="reports/figures/banner.png" alt="Abstract visualization of a Bitcoin transaction graph with flagged illicit nodes highlighted" width="100%">
+  <img src="reports/figures/banner.png" alt="A detective's investigation board of Bitcoin transaction case cards, with a cluster of flagged illicit transactions connected by red string" width="100%">
 </p>
 
 A complete, end-to-end system for detecting illicit Bitcoin transactions: exploratory analysis of the
