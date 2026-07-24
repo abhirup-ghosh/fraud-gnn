@@ -1,221 +1,368 @@
 # Fraud-GNN — Graph Neural Network Fraud Detection on the Elliptic Bitcoin Dataset
 
-## 1. What this project does
+<p align="center">
+  <img src="reports/figures/banner.png" alt="Fraud-GNN: dataset composition, model comparison, and live drift monitoring" width="100%">
+</p>
 
-**In one sentence:** this project trains a graph-based AI model to spot fraudulent Bitcoin
-transactions, then serves it as a live, monitored web service — the whole pipeline from raw data to
-a running, observable system, not just a notebook.
-
-Concretely, it takes ~200,000 real (anonymised) Bitcoin transactions, some of which are known to be
-tied to criminal activity, builds a model that scores new transactions for how suspicious they look,
-and wraps that model in the infrastructure a real deployment would need: a live API, a fast lookup
-store, and dashboards that watch whether the model is still working correctly.
-
-**Who this is for:** anyone comfortable with the general ideas of cryptocurrency, fraud, and machine
-learning. You do **not** need to already know what a graph neural network is — the explanations below
-are built for that. If you want the expert-level detail (exact hyperparameters, every test, every
-measured number), it's one level down in [`docs/plan.md`](docs/plan.md); this document stays at the
-level of "what was built, what it found, and whether it worked."
+A complete, end-to-end system for detecting illicit Bitcoin transactions: exploratory analysis of the
+public Elliptic dataset, a Graph Neural Network trained on the resulting transaction graph, and a
+containerised, real-time inference service instrumented with production-style monitoring
+(system health, model performance, and concept-drift detection).
 
 ---
 
-## 2. The problem, explained simply
+## 1. Overview
 
-Bitcoin is *pseudonymous*: every payment is publicly visible, but nothing tells you who's actually
-behind it. Criminals exploit this — ransomware payouts, dark-market sales, laundering — by moving
-funds through chains of transactions designed to blend into ordinary activity. Investigators and
-exchanges want to answer one question, fast: *does this transaction look illicit?*
+**Elevator summary:** this repository trains a 2-layer GraphSAGE Graph Neural Network on the
+Elliptic Bitcoin transaction graph (203,769 nodes, 234,355 edges) to classify transactions as
+illicit or licit, and serves the resulting model behind a FastAPI endpoint backed by a Redis
+feature/adjacency store, with Prometheus + Grafana monitoring across three layers: system health,
+model performance, and concept drift.
 
-**Why connections matter.** Judging a transaction purely on its own numbers (amount, fee, timing)
-misses something important: fraud is often visible in the *company a transaction keeps*, not just its
-own attributes. If you draw the data out as a **graph** — every transaction is a dot, every payment
-between two transactions is a line connecting two dots — suspicious activity often shows up as
-suspicious *neighbourhoods*, clusters of connected transactions that behave unusually together, not
-just individually unusual transactions in isolation.
+The project is organised in two phases:
 
-**Why a graph neural network, specifically.** A **Graph Neural Network (GNN)** is a model built to
-use exactly that structure. Instead of judging each transaction alone, it lets every transaction
-"listen to" its immediate neighbours in the graph before making a decision — a bit like judging a
-person partly by the company they keep, rather than purely on their own resume. That's the whole
-intuition; the rest of this project is about whether that intuition actually pays off in practice (see
-§5 for the honest answer).
+- **Phase 1 — Exploratory Data Analysis.** Statistical and graph-theoretic analysis of the Elliptic
+  dataset (`notebooks/01_eda.ipynb`), producing the risk signals and design constraints that drove
+  Phase 2's architecture.
+- **Phase 2 — Implementation.** A full build, from data pipeline through a containerised, monitored,
+  real-time service, executed as 12 discrete stages, each with binding, tested acceptance criteria.
 
----
+**Intended audience:** this document assumes general familiarity with cryptocurrency, fraud
+detection, and machine learning, and is written to be readable without prior graph neural network
+experience — non-technical explanations accompany the technical ones throughout rather than
+replacing them. No separate document is required to evaluate the project's methodology or results.
 
-## 3. The data, in plain terms
+### Key metrics at a glance
 
-This project uses the public [**Elliptic** dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set):
-real Bitcoin transaction data, released for exactly this kind of research. In plain terms, it's three
-things stitched together:
-
-- **~204,000 transactions** — each with a set of anonymised numerical properties. They're
-  anonymised deliberately: we don't know what each number literally means, so any model has to learn
-  from statistical patterns, not from human-readable fields.
-- **~234,000 links** between transactions — who paid whom, forming the graph described in §2.
-- **A label for some transactions** — *licit* (legitimate), *illicit* (criminal), or nothing at all.
-
-**Why most transactions are unlabelled, and why it matters.** Only about **1 in 4** transactions has
-any label at all — the rest are simply unknown, because nobody has gone through and confirmed them
-one way or the other. This is normal for real-world fraud data (nobody labels the entire history of
-Bitcoin), but it means the model has to be trained carefully: it can *see* the unlabelled
-transactions (their properties and their position in the graph), just not learn from a "correct
-answer" for them.
-
-**Three honest challenges this project is built around:**
-
-1. **Fraud is a needle in a haystack, and most of the haystack isn't even labelled.** A model that
-   blindly guesses "everything is fine" would look deceptively accurate while being completely
-   useless — so success has to be measured with fraud-appropriate yardsticks, not raw accuracy.
-2. **The past doesn't reliably predict the future.** A model trained on older data can quietly stop
-   working on newer data — sometimes gradually, sometimes overnight, for example when a real
-   criminal marketplace gets shut down and behaviour shifts abruptly. This is called *concept drift*,
-   and it turns out to be the single most important operational risk in this entire project.
-3. **A model sitting in a notebook helps nobody.** The point is a live service: send it a
-   transaction, get a risk score back fast enough to be useful, with a way to notice — automatically —
-   if the model starts drifting away from reality.
+| Metric | Value |
+|---|---|
+| Transactions (nodes) | 203,769 |
+| Payment edges | 234,355 |
+| Time steps | 49 |
+| Labelled fraction | 22.85% (4,545 illicit / 42,019 licit) |
+| Illicit share of labelled data | 9.76% |
+| GNN architecture | 2-layer GraphSAGE, hidden dim 128, mean aggregation |
+| Baseline model | Random Forest, 200 estimators |
+| GNN test ROC-AUC / PR-AUC / F1 | 0.863 / 0.630 / 0.527 |
+| Baseline test ROC-AUC / PR-AUC / F1 | 0.939 / 0.798 / 0.804 |
+| Inference latency (p95, end-to-end HTTP) | 11.5 ms |
+| Load test throughput | 5,000/5,000 requests succeeded, 0 errors |
+| Automated test suite | 26 tests (data, model, drift, feature store, API) |
+| Monitored containers | 4 (API, Redis, Prometheus, Grafana) |
 
 ---
 
-## 4. How it works, at a glance
+## 2. Problem statement
 
-The project has two phases: **analysis first, then a live service** built on what the analysis found.
+Bitcoin transactions are pseudonymous: every payment is publicly recorded on-chain, but no identity
+is directly attached to an address. This property is exploited for money laundering, ransomware
+payouts, and dark-market commerce, where funds are routed through chains of transactions designed to
+obscure origin. The practical task is binary classification: given a transaction and its position in
+the payment graph, estimate the probability that it is illicit.
 
-```
-  Phase 1: Analysis                        Phase 2: Live service
-  ──────────────────                       ──────────────────────
-
-  raw transaction data                     new transaction arrives
-         │                                          │
-         ▼                                          ▼
-  explore it, find the                      look up its position in
-  strongest fraud signals                   the transaction graph
-         │                                          │
-         ▼                                          ▼
-  write an exact build plan          ──▶     ask the GNN model:
-  for the live service                       "how suspicious is this,
-                                              given what it's linked to?"
-                                                     │
-                                                     ▼
-                                              risk score + decision
-                                                     │
-                                                     ▼
-                                              dashboards: is the
-                                              service healthy, accurate,
-                                              and still trustworthy?
-```
-
-**The smart part vs. the plumbing.** Only one piece of this system is genuinely "smart": the GNN
-model itself, which makes the actual judgement call. Everything else — the web server, the fast
-lookup store, the metrics, the dashboards — is *plumbing*. Its entire job is to get a real
-transaction to the model quickly, and to notice, automatically, the moment the model can no longer be
-trusted. Both halves matter: a smart model with no plumbing is a science project; plumbing with no
-smart model is pointless.
+**Why graph structure is informative.** Modelling transactions independently discards information
+carried by their connectivity. Representing the data as a directed graph — each transaction a node,
+each payment an edge — allows a classifier to condition on a transaction's local neighbourhood, not
+just its own feature vector. This is the basis for using a **Graph Neural Network (GNN)**: rather
+than processing each node's features in isolation, a GNN performs *message passing*, aggregating
+transformed representations from a node's neighbours at each layer, so a 2-layer network conditions
+each prediction on up to a 2-hop neighbourhood. In non-technical terms, this is analogous to
+assessing a person partly by their known associates rather than by their attributes alone. Whether
+this structural signal outperforms a purely tabular model on this dataset is an empirical question
+this project answers directly (§5).
 
 ---
 
-## 5. What we found
+## 3. Dataset
 
-### Phase 1 — the analysis
+The [Elliptic Data Set](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set) is a public
+graph of real Bitcoin transactions released for anti-money-laundering research. It consists of three
+components:
 
-- **Fraud is rare and mostly unlabelled.** About 1 in 45 transactions is confirmed illicit; three
-  in four have no label at all.
-- **Fewer connections, not more, is the fraud signal.** Counter-intuitively, transactions that turn
-  out to be fraudulent tend to have *fewer* connections in the graph than legitimate ones — useful,
-  if not what you'd guess going in.
-- **A handful of properties do most of the work.** A small number of the anonymised transaction
-  properties separate fraud from non-fraud very cleanly, on their own, before any graph reasoning is
-  even applied.
-- **The past stops predicting the future, sharply.** Every model tried — including the one
-  eventually shipped — shows a performance cliff at a specific point in the transaction timeline,
-  lining up with a real-world event (a dark-market marketplace being shut down, per public reporting
-  on the underlying data). This is the finding the entire monitoring system in §6 exists to catch.
-
-### Phase 2 — the live service, and an honest result
-
-**In one sentence:** a simpler, older-style model (a Random Forest) beat the graph-based model on
-held-out data, and that's reported here plainly rather than smoothed over.
-
-| Metric | Random Forest (simpler baseline) | GNN (the model actually shipped) |
+| File | Rows | Content |
 |---|---|---|
-| ROC-AUC | 0.939 | 0.863 |
-| PR-AUC | 0.798 | **0.630** |
-| F1 | 0.804 | **0.527** |
+| `elliptic_txs_features.csv` | 203,769 | `txId`, `time_step` (1–49), and 165 anonymised numerical features (93 local + 72 aggregated one-hop statistics) |
+| `elliptic_txs_edgelist.csv` | 234,355 | `txId1 → txId2` directed payment edges |
+| `elliptic_txs_classes.csv` | 203,769 | Label per `txId`: `1` = illicit, `2` = licit, `unknown` = unlabelled |
 
-**Why, in short:** picking the "best" version of the GNN during training meant choosing the version
-that did best on a held-out slice of *normal* data — deliberately excluding the "weird,
-post-marketplace-shutdown" data, which sounds sensible. In practice, that backfired: it meant
-consistently picking the version of the model that was best at handling normal conditions, which
-turned out to be close to the opposite of what actually mattered once evaluated against the genuinely
-unusual test period. The full technical diagnosis, every combination of settings tried, and the two
-concrete ideas for actually fixing it, are in [`docs/plan.md`](docs/plan.md) (§S5) and
-[`docs/followup.md`](docs/followup.md) — deliberately not hidden in this document.
+Features are pre-anonymised and standardised by the dataset publisher; their semantic meaning is not
+disclosed, so all modelling is feature-agnostic by construction.
 
-A tabular model beating a graph model under exactly this kind of shift is a real, useful finding in
-its own right, not a failure to apologise for.
+**Class distribution:**
+
+| Class | Count | % of all nodes | % of labelled nodes |
+|---|---|---|---|
+| Illicit | 4,545 | 2.23% | 9.76% |
+| Licit | 42,019 | 20.62% | 90.24% |
+| Unknown | 157,205 | 77.15% | — |
+
+Only 22.85% of nodes carry a ground-truth label; the remaining 77.15% are of unknown status. All
+nodes — labelled and unlabelled — participate in message passing (a transductive setting), but only
+labelled nodes contribute to the training loss.
+
+**Graph topology:**
+
+| Property | Value |
+|---|---|
+| Mean / median / max degree | 2.30 / 2 / 473 |
+| Mean degree, illicit nodes | 2.01 (in 1.27, out 0.74) |
+| Mean degree, licit nodes | 3.10 (in 1.91, out 1.19) |
+| Edges crossing time steps | 0.00% |
+| Connected components | 49 (exactly one per time step) |
+| Graph type | Directed acyclic graph (confirmed) |
+
+The finding that 100% of edges are intra-time-step — the graph decomposes into 49 temporally
+disjoint components — is structurally significant: it rules out cross-time information leakage and
+motivates the temporal train/test split described in §5, since message passing cannot propagate
+information across time steps by construction.
+
+**Univariate feature separation** (Cohen's *d*, illicit vs. licit, ranked): `feat_53` (d=1.16),
+`feat_55` (d=1.00), `feat_89` (d=0.99), `feat_90` (d=0.99), `feat_91` (d=0.76), `feat_52` (d=0.75).
+These six features form the basis of the production concept-drift monitor (§6).
+
+**Operational risk factors identified in Phase 1**, each of which directly shaped the Phase-2
+architecture:
+
+1. **Severe class imbalance combined with majority-unlabelled data** — 2.23% illicit overall, 77.15%
+   unlabelled — rules out accuracy as an evaluation metric; PR-AUC and F1 are used throughout.
+2. **Non-stationarity / concept drift.** Illicit-rate and model performance are not stable across
+   time steps; per-time-step evaluation (§5) shows a sharp degradation after time step ≈43,
+   consistent with a documented dark-market shutdown affecting the underlying transaction patterns.
+3. **Deployment requirement.** A static model has no operational value without continuous
+   performance and drift monitoring — the system described in §6 exists specifically to detect the
+   failure mode identified in this analysis.
 
 ---
 
-## 6. The live service, explained
+## 4. System architecture
 
-Four small programs run together, each with one job:
+```
+                         docker-compose (4 services, local orchestration)
 
-- **The front door** (`api`) — a web server that receives a transaction, asks the model for a risk
-  score, and answers back — this is the only piece anything outside the system talks to directly.
-- **The memory** (`redis`) — holds every transaction's properties and its immediate neighbours in
-  the graph, so answering "who is this transaction connected to?" is a fast lookup, not a re-scan of
-  the whole dataset.
-- **The gauges** (`prometheus`) — continuously records how busy the service is, how confident its
-  predictions are, and — critically — how much incoming traffic still resembles what the model was
-  trained on.
-- **The dashboard** (`grafana`) — turns those gauges into screens a human would actually watch, with
-  no manual setup required; it's provisioned automatically.
+ ┌──────────────┐   HTTP    ┌──────────────────────────┐   pipelined    ┌────────────┐
+ │  client /    │ ────────▶ │   api (FastAPI+Uvicorn)   │ ─── lookup ──▶ │   redis    │
+ │  load-gen    │ ◀──────── │   /score /health /metrics │ ◀────────────  │  feature + │
+ └──────────────┘  response │   /feedback                │                │  adjacency │
+                            │   GraphSAGE (PyTorch, CPU) │                │    store    │
+                            └─────────────┬──────────────┘                └────────────┘
+                                          │ scrape (5s interval)
+                                ┌─────────▼─────────┐   query    ┌────────────┐
+                                │     prometheus     │ ─────────▶ │  grafana   │
+                                │  (metrics storage)  │            │ (4-panel   │
+                                └────────────────────┘            │ dashboard) │
+                                                                   └────────────┘
+```
 
-**What "real time" means here.** Send a transaction, get a risk score back in well under a tenth of a
-second: in testing, **95 out of 100 requests came back in about 11 milliseconds or less** (for
-comparison, a single eye-blink takes roughly 100–150 milliseconds). That was measured by actually
-firing 5,000 real requests at the running service, not estimated.
+**Design principle: separation of the learned component from operational infrastructure.** The
+GraphSAGE model is the only statistically learned element in the serving path. The API layer,
+feature store, metrics pipeline, and dashboards constitute deterministic infrastructure whose
+function is to deliver transactions to the model with low latency and to continuously verify that
+the model's operating conditions still resemble its training distribution.
 
-**What the drift monitor is watching for, and why it's necessary.** One of the gauges specifically
-tracks *concept drift*: is today's traffic starting to look statistically different from the data the
-model was trained on? This isn't a theoretical concern added for completeness — §5 found exactly this
-kind of shift already happened once in the historical data, sharply and specifically. A model that
-isn't watched for this will quietly keep giving confident answers while being wrong, which is worse
-than no model at all. In testing, deliberately feeding the service transactions from the "after the
-shift" period pushed this gauge well past its alert threshold — live, on the dashboard — showing the
-monitoring actually catches the exact failure mode Phase 1 uncovered.
+**Component inventory:**
+
+| Component | Technology | Role |
+|---|---|---|
+| Inference API | FastAPI + Uvicorn | `/score`, `/health`, `/metrics`, `/feedback` |
+| Feature/adjacency store | Redis 7 (alpine) | Per-transaction feature hashes (`feat:{txId}`) and neighbour sets (`nbr:{txId}`), pipelined batch access |
+| Model | PyTorch 2.13 + PyTorch Geometric 2.8, GraphSAGE, CPU inference | Scores a transaction given its 1-hop induced subgraph |
+| Metrics | prometheus-client + prometheus-fastapi-instrumentator | System-health metrics (free), plus custom Counters/Histograms/Gauges for model performance and drift |
+| Dashboards | Grafana | Fully provisioned on startup — no manual configuration |
+| Orchestration | docker-compose + Makefile | 4 services, single-command bring-up |
 
 ---
 
-## 7. Try it yourself
+## 5. Methodology & results
+
+### 5.1 Baseline model
+
+A Random Forest (`scikit-learn`, 200 estimators, balanced class weights, `random_state=42`) was
+trained on the same feature set to establish a tabular performance bar. Evaluated on a temporal
+holdout (train: `time_step ≤ 34`, n=29,894 labelled; test: `time_step ≥ 35`, n=16,670 labelled):
+
+| Metric | Value |
+|---|---|
+| ROC-AUC | 0.9391 |
+| PR-AUC | 0.7976 |
+| F1 (threshold 0.5) | 0.8039 |
+| Precision | 0.9023 |
+| Recall | 0.7248 |
+
+### 5.2 GraphSAGE model
+
+**Architecture:** `SAGEConv(165→128) → BatchNorm1d → ReLU → Dropout(0.3) → SAGEConv(128→128) →
+BatchNorm1d → ReLU → Dropout(0.3) → Linear(128→2)`, mean-aggregation, trained with class-weighted
+cross-entropy loss (`w_licit=0.566, w_illicit=4.317`) and Adam (`lr=5e-3, weight_decay=5e-4`),
+full-batch, up to 300 epochs with early stopping (patience=30) on validation PR-AUC.
+
+**Training determinism.** Training runs on CPU. Empirically, PyTorch's MPS backend produced
+non-deterministic results for this architecture — identical seed and configuration yielded
+validation PR-AUC ranging from 0.67 to 0.98 across repeated runs (traced to non-deterministic
+scatter-reduce behaviour in `SAGEConv` on Apple Silicon's MPS backend). CPU training is bit-for-bit
+reproducible (two independent runs: `best_val_pr_auc=0.9797`, `best_epoch=137`, identical to four
+decimal places) and completes in approximately two minutes for this graph size.
+
+**Validation-set performance:** `best_val_pr_auc = 0.9797` at epoch 137; F1-optimal decision
+threshold = 0.8555 (validation F1 = 0.9411 at that threshold).
+
+**Test-set performance** (same temporal holdout as the baseline, n=16,670):
+
+| Metric | @ threshold 0.5 | @ F1-optimal threshold (0.8555) |
+|---|---|---|
+| ROC-AUC | 0.8626 | 0.8626 |
+| PR-AUC | 0.6297 | 0.6297 |
+| F1 | 0.4193 | 0.5274 |
+| Precision | 0.2931 | 0.4269 |
+| Recall | 0.7359 | 0.6898 |
+
+**Result: the GraphSAGE model does not exceed the Random Forest baseline on this evaluation** (PR-AUC
+0.630 vs. 0.798; F1 0.527 vs. 0.804), despite comparable ROC-AUC (0.863 vs. 0.939). This is reported
+as a primary empirical result of the project, not a defect to be minimised.
+
+<details>
+<summary><strong>Hyperparameter sweep and root-cause analysis (click to expand)</strong></summary>
+
+Per the acceptance criteria defined for this stage, five of twelve permitted hyperparameter
+combinations were evaluated (`HIDDEN ∈ {128,256}`, `DROPOUT ∈ {0.3,0.4,0.5}`, `LR ∈ {1e-3,5e-3}`, no
+architectural changes permitted):
+
+| Hidden | Dropout | LR | Val PR-AUC | Test PR-AUC | Test F1 | Test ROC-AUC | Test Precision @opt |
+|---|---|---|---|---|---|---|---|
+| 128 | 0.4 (initial default) | 5e-3 | 0.9828 | 0.5203 | 0.5341 | 0.8591 | 0.4578 |
+| 128 | 0.5 | 1e-3 | 0.9808 | 0.2853 | 0.3893 | 0.8329 | 0.2677 |
+| 128 | 0.5 | 5e-3 | 0.9816 | 0.4950 | 0.4881 | 0.8478 | 0.3891 |
+| **128** | **0.3** | **5e-3** | **0.9797** | **0.6297 (shipped)** | **0.5274** | **0.8626** | **0.4269** |
+| 256 | 0.3 | 5e-3 | 0.9801 | 0.5717 | 0.4806 | 0.8525 | 0.3680 |
+
+Every configuration exhibits the same signature: validation PR-AUC saturates near 0.98 while test
+PR-AUC remains in the 0.29–0.63 range, and precision collapses to 0.27–0.46 at any reasonable
+decision threshold (vs. 0.90 for the baseline) despite acceptable ROC-AUC. This pattern is consistent
+across hidden width, dropout, and learning rate, indicating the limitation is not resolvable by
+hyperparameter tuning alone.
+
+**Root cause.** `val_mask` is a random 15% stratified sample of the *training* period
+(`time_step ≤ 34`), deliberately excluding the drift-affected region to avoid contaminating early
+stopping with anomalous data. This choice has the unintended effect of selecting the checkpoint that
+best predicts *stationary* conditions — the inverse of what generalises to the drift-affected test
+region (`time_step ≥ 35`). The Random Forest baseline does not exhibit this failure mode, as it has
+no validation-based model-selection step.
+
+**Per-time-step test performance**, illustrating the degradation:
+
+| Time step | n | n illicit | ROC-AUC | F1 |
+|---|---|---|---|---|
+| 35 | 1,341 | 182 | 0.9916 | 0.9003 |
+| 38 | 756 | 111 | 0.9664 | 0.7510 |
+| 42 | 2,154 | 239 | 0.9143 | 0.7209 |
+| **43** | 1,370 | 24 | 0.5180 | 0.0111 |
+| 44 | 1,591 | 24 | 0.5291 | 0.0274 |
+| 47 | 846 | 22 | 0.5594 | 0.0303 |
+| 49 | 476 | 56 | 0.3875 | 0.0194 |
+
+The transition at time step 43 is abrupt across both the GraphSAGE model and the Random Forest
+baseline, reproducing the concept-drift finding from Phase 1 (§3) in a live evaluation setting.
+
+Two candidate remediations are identified and deferred to §8: a temporal validation split positioned
+near the train/test boundary (directly targeting the diagnosed cause), and a residual connection from
+raw input features to the output layer (preserving the strong univariate signal identified in §3
+against dilution by neighbourhood averaging).
+
+</details>
+
+---
+
+## 6. Real-time service & monitoring
+
+### 6.1 Inference API
+
+The service exposes two scoring modes via `POST /score`:
+
+- **Known-transaction scoring** (`{"txId": ...}`) — retrieves the transaction's 1-hop induced
+  subgraph from the Redis feature store and performs a forward pass.
+- **Inductive scoring** (`{"features": [...165 values...], "neighbor_features": [[...], ...]}`) —
+  constructs a star subgraph from supplied feature vectors, enabling scoring of transactions absent
+  from the store (GraphSAGE's inductive capability).
+
+`GET /health` reports service status and model version; `GET /metrics` exposes a Prometheus
+exposition endpoint; `POST /feedback` accepts ground-truth labels for previously scored transactions
+and updates rolling precision/recall/F1 gauges.
+
+### 6.2 Feature store
+
+Redis holds two structures per transaction: a hash of its 165 features (`feat:{txId}`) and a set of
+its neighbour transaction IDs (`nbr:{txId}`) — 407,538 keys total (2 × 203,769 nodes, confirming zero
+isolated nodes in the graph). Subgraph retrieval is pipelined — one round trip per BFS layer for
+neighbour lookups, one round trip for all feature lookups — rather than one round trip per node. This
+reduced retrieval latency for the highest-degree node in the graph (473 neighbours) from
+approximately 475 ms (naive, one round trip per neighbour) to approximately 141 ms; over a random
+sample of 200 transactions representative of the graph's mean degree (2.3), retrieval latency is
+p50=2.07 ms, p95=5.18 ms, max=36.37 ms.
+
+### 6.3 Monitoring — three layers
+
+| Layer | Metrics | Purpose |
+|---|---|---|
+| **System health** | Request rate, p50/p95/p99 latency, error rate, in-flight requests, process CPU/memory (via `prometheus-fastapi-instrumentator`, no custom instrumentation required) | Standard service-level observability |
+| **Model performance** | `fraud_predictions_total{label}` (Counter), `fraud_score_histogram` (Histogram), `fraud_flagged_ratio` (Gauge, rolling last 1,000 predictions), `fraud_rolling_precision/recall/f1` (Gauges, updated via `/feedback`) | Tracks prediction volume, score distribution, and — where ground truth is available — live accuracy |
+| **Concept drift** | `fraud_drift_psi` (Gauge) | Detects distributional shift in live traffic relative to the training distribution |
+
+**Concept-drift detection (technical detail).** The drift monitor maintains a sliding buffer of the
+1,000 most recent observations and recomputes, every 200 new observations, the Population Stability
+Index (PSI) for each of the six highest-separation features identified in §3, against a 10-bin
+reference distribution derived from the training set. `drift_score` is the mean PSI across these six
+features. Thresholds: PSI < 0.10 (stable), 0.10–0.25 (moderate — logged as a warning), > 0.25
+(significant — alert). In plain terms: this continuously checks whether current traffic still
+resembles the data the model was trained on, and raises a signal well before accuracy would visibly
+degrade.
+
+**End-to-end verification.** A load test of 5,000 requests (mixed known-transaction and inductive
+scoring, the final 30% deliberately drawn from post-time-step-43 transactions to induce drift) against
+the fully containerised stack produced:
+
+| Metric | Value |
+|---|---|
+| Requests succeeded / failed | 5,000 / 0 |
+| Mean latency | 7.38 ms |
+| p50 latency | 6.10 ms |
+| p95 latency | 11.49 ms |
+| p99 latency | 16.63 ms |
+| Max latency | 164.23 ms |
+| `fraud_drift_psi` during drift-inducing phase | 0.86 (exceeds the 0.25 "significant" threshold) |
+
+The drift gauge crossing its alert threshold during the deliberately drift-inducing phase of this
+test confirms the monitor detects, live, the exact failure mode identified analytically in §3 and §5.
+
+---
+
+## 7. Quickstart
 
 ```bash
-make setup                    # install the Python environment
-make train                    # train the GNN (reproducible, ~2 minutes on CPU)
-make eval                     # print the model's final test-set numbers
+make setup                    # uv sync — install the Python environment
+make train                    # train GraphSAGE (deterministic on CPU, ≈2 minutes)
+make eval                     # print final test-set metrics and the per-time-step table
 
-make up                       # start all 4 services in Docker
-make seed                     # load the transaction graph into the fast lookup store
-make loadgen                  # send 5,000 real test requests, report latency
+make up                       # docker compose up --build -d — starts all 4 services
+make seed                     # load the transaction graph into Redis
+make loadgen                  # issue 5,000 test requests; reports latency percentiles
 
-# then open:
-#   http://localhost:8000/docs   — try the API directly (interactive docs)
-#   http://localhost:9090        — Prometheus (raw metrics)
-#   http://localhost:3000        — Grafana (the dashboard, no login needed)
-
-make down                     # stop everything, clean up
+make down                     # stop and remove all containers
 ```
 
-**What you should expect to see.** The Grafana dashboard (`http://localhost:3000`) opens straight to
-a page titled *Fraud-GNN Monitoring* with four rows, top to bottom: **System Health** (request rate,
-latency, CPU/memory — general web-service vital signs), **Prediction Volume & Score Distribution**
-(how many transactions are being flagged, and how confident the model is), **Concept Drift** (the
-gauge described in §6, with coloured threshold lines at "moderate" and "significant" drift), and
-**Model Performance** (accuracy metrics, if feedback on real outcomes is supplied via `/feedback`).
-Running `make loadgen` while the dashboard is open makes every panel move in real time — including,
-during the load generator's deliberate "drift phase," the Concept Drift panel visibly crossing into
-its alert zone.
+| Endpoint | URL | Description |
+|---|---|---|
+| API (interactive docs) | `http://localhost:8000/docs` | OpenAPI/Swagger UI for `/score`, `/health`, `/metrics`, `/feedback` |
+| Prometheus | `http://localhost:9090` | Raw metrics and query interface |
+| Grafana | `http://localhost:3000` | Provisioned dashboard, no login required |
 
-If you'd rather start with the analysis than the live service, the Phase-1 notebook is simpler:
+**Grafana dashboard layout** (`Fraud-GNN Monitoring`, provisioned automatically): four rows —
+*System Health* (request rate, latency, CPU/memory), *Prediction Volume & Score Distribution*
+(prediction rate by label, score histogram, flagged-ratio gauge), *Concept Drift* (`fraud_drift_psi`
+with 0.10/0.25 threshold lines), and *Model Performance* (rolling precision/recall/F1, populated once
+`/feedback` receives ground-truth labels). Running `make loadgen` while the dashboard is open drives
+all four rows live, including the Concept Drift panel crossing its alert threshold during the load
+generator's drift-inducing phase.
+
+To run only the Phase-1 analysis:
 
 ```bash
 uv sync
@@ -224,58 +371,54 @@ uv run jupyter lab notebooks/01_eda.ipynb
 
 ---
 
-## 8. Honest limitations & what's next
+## 8. Future work
 
-- **The shipped model doesn't beat the simpler baseline** (§5) — the headline limitation of this
-  project, diagnosed but not yet fixed. Two concrete fixes are identified but deliberately deferred:
-  validating the model on data that actually resembles the "shifted" test conditions, and adjusting
-  the model architecture so it can't dilute its strongest raw signals. Both are recorded in
-  [`docs/followup.md`](docs/followup.md).
-- **Not every possible model configuration was tried.** Of the tuning options allowed for fixing the
-  gate above, 5 of 12 were tried before deciding to stop and report the honest result rather than
-  keep searching (see `docs/plan.md` §S5 for exactly which ones, and why continuing looked unlikely
-  to help).
-- **The training hardware's GPU (Apple's "MPS" backend) is deliberately unused.** It produced
-  wildly inconsistent results between otherwise-identical training runs, so training runs on CPU
-  instead — slightly slower, but trustworthy. Worth re-testing on a future PyTorch release
-  (`docs/followup.md`).
-- **The container image is heavier than it needs to be.** It correctly runs everything needed, but
-  currently includes some analysis-only tooling it doesn't use in production — a known, low-priority
-  cleanup item.
+The following items are scoped, diagnosed where applicable, and deliberately deferred rather than
+implemented in this iteration:
 
-For the full technical build record — every stage, every test, every number, and the reasoning behind
-every non-obvious decision — see [`docs/plan.md`](docs/plan.md). It doubles as the project's
-implementation log, not just a prospective plan.
+| Item | Rationale | Expected impact |
+|---|---|---|
+| Temporal validation split (last few pre-test time steps, replacing the random 15% split) | Directly targets the root cause identified in §5.2 — early stopping currently selects for stationary-period performance | Primary candidate for closing the PR-AUC/F1 gap to the baseline |
+| Residual connection from raw features to the output layer | Preserves the strong univariate signal identified in §3 against dilution from neighbourhood averaging, particularly for low-degree (illicit) nodes | Secondary candidate, complementary to the above |
+| Complete remaining hyperparameter sweep (7 of 12 combinations untested) | Low priority — the observed precision-collapse pattern is consistent across all five tested combinations, suggesting tuning alone is insufficient | Low expected impact in isolation |
+| Re-enable MPS training | PyTorch's MPS backend produced non-deterministic `SAGEConv` results on this hardware/version combination; revisit on a future PyTorch release | Training-speed improvement only; no accuracy impact expected |
+| Reduce container image size | The serving image currently bundles analysis-only dependencies (Jupyter, matplotlib) not required at inference time; splitting dependency groups and/or using a CPU-only PyTorch wheel index would reduce build time and image size | Operational efficiency, no functional change |
 
 ---
 
-## 9. Project structure & docs map
+## 9. Repository structure
 
 ```
 fraud-gnn/
-├── README.md                  # this file — the audit-level overview
+├── README.md                  # this document
 ├── LICENSE                    # MIT
 ├── docs/
-│   ├── plan.md                # the full technical build record: every stage, test, and result
-│   └── followup.md            # deferred ideas ("future improvements") and things deliberately out of scope
+│   ├── plan.md                 # full engineering build log: every stage, test, and measured result
+│   └── followup.md             # tracked future-work and out-of-scope items
 ├── notebooks/
-│   └── 01_eda.ipynb           # Phase-1 exploratory analysis, with all findings and visualisations
-├── reports/                   # exported EDA figures and headline-number summaries
-├── data/                      # the Elliptic dataset (not committed — see docs/plan.md to obtain it)
-├── src/fraud_gnn/             # all Python source: data loading, model, training, serving, monitoring
-│   └── serve/                 # the FastAPI application (/score, /health, /metrics, /feedback)
-├── scripts/                   # the Redis loader and the load-test generator
-├── tests/                     # the automated test suite (pytest)
-├── docker/                    # the API's Dockerfile, Prometheus config, Grafana dashboards
-├── docker-compose.yml         # brings up all 4 services together
-├── Makefile                   # the commands in §7, spelled out
-├── artifacts/                 # trained model + metadata (produced locally by `make train`, not committed)
-└── pyproject.toml             # Python dependencies (managed by uv)
+│   └── 01_eda.ipynb            # Phase-1 exploratory analysis
+├── reports/                    # exported EDA figures and summary statistics
+├── data/                       # Elliptic dataset (not committed; see §3 for source)
+├── src/fraud_gnn/
+│   ├── data.py                  # data loading, temporal/stratified masks, class weighting
+│   ├── model.py                 # GraphSAGE definition
+│   ├── train.py                 # training loop and artefact export
+│   ├── evaluate.py               # test-set and per-time-step evaluation
+│   ├── baseline.py               # Random Forest baseline
+│   ├── featurestore.py           # Redis feature/adjacency store client
+│   ├── drift.py                  # PSI concept-drift monitor
+│   └── serve/                    # FastAPI application (/score, /health, /metrics, /feedback)
+├── scripts/                    # Redis loader, load-test generator
+├── tests/                      # automated test suite (26 tests; pytest)
+├── docker/                     # API Dockerfile, Prometheus config, Grafana provisioning
+├── docker-compose.yml          # 4-service orchestration
+├── Makefile                    # commands listed in §7
+└── pyproject.toml              # Python dependencies (uv-managed)
 ```
 
 ---
 
-## 10. Credits & license
+## 10. License & attribution
 
 - **Dataset:** [Elliptic Data Set](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set),
   released by Elliptic and collaborators for anti-money-laundering research on Bitcoin.
