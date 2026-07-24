@@ -28,6 +28,10 @@ here.
    between sessions. Use a WIP-style message (e.g. `Phase2 S5 WIP: <what's done so far>`) instead of
    the stage's normal commit message, and finish with the stage's real commit once the acceptance
    criteria pass.
+7. **Stop after every stage.** Once a stage's acceptance criteria pass and its commit is pushed, do
+   **not** automatically start the next stage. Summarise what was done in that stage (what was built,
+   what passed, any deviations logged) and then stop and wait. Only begin the next stage once the
+   human explicitly asks to continue.
 
 ---
 
