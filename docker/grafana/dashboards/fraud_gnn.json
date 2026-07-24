@@ -1,0 +1,101 @@
+{
+  "title": "Fraud-GNN Monitoring",
+  "uid": "fraud-gnn-monitoring",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    { "type": "row", "title": "System Health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100 },
+
+    {
+      "id": 1, "type": "timeseries", "title": "Request rate by handler",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        { "expr": "sum by (handler) (rate(http_request_duration_seconds_count[1m]))", "legendFormat": "{{handler}}" }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Latency p50 / p95 / p99 (/score)",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/score\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/score\"}[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/score\"}[5m])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Process CPU & memory",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "cpu (cores)" },
+        { "expr": "process_resident_memory_bytes", "legendFormat": "resident memory" }
+      ]
+    },
+
+    { "type": "row", "title": "Prediction Volume & Score Distribution", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 200 },
+
+    {
+      "id": 4, "type": "timeseries", "title": "Predictions per second by label",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "targets": [
+        { "expr": "sum by (label) (rate(fraud_predictions_total[1m]))", "legendFormat": "{{label}}" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Predicted illicit-probability distribution (p50 / p95)",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(fraud_score_histogram_bucket[5m])))", "legendFormat": "p50 score" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(fraud_score_histogram_bucket[5m])))", "legendFormat": "p95 score" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Flagged-illicit ratio (rolling last 1000)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "targets": [
+        { "expr": "fraud_flagged_ratio", "legendFormat": "flagged ratio" }
+      ],
+      "fieldConfig": { "defaults": { "max": 1, "min": 0, "unit": "percentunit" }, "overrides": [] }
+    },
+
+    { "type": "row", "title": "Concept Drift", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }, "id": 300 },
+
+    {
+      "id": 7, "type": "timeseries", "title": "Drift score (mean PSI over top EDA features)",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 19 },
+      "targets": [
+        { "expr": "fraud_drift_psi", "legendFormat": "drift_score" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+
+    { "type": "row", "title": "Model Performance (feedback)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }, "id": 400 },
+
+    {
+      "id": 8, "type": "timeseries", "title": "Rolling precision / recall / F1 (confirmed feedback)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 29 },
+      "targets": [
+        { "expr": "fraud_rolling_precision", "legendFormat": "precision" },
+        { "expr": "fraud_rolling_recall", "legendFormat": "recall" },
+        { "expr": "fraud_rolling_f1", "legendFormat": "f1" }
+      ],
+      "fieldConfig": { "defaults": { "max": 1, "min": 0 }, "overrides": [] }
+    }
+  ]
+}
