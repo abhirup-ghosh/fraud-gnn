@@ -8,6 +8,23 @@ Phase-1 EDA (`notebooks/01_eda.ipynb`, findings in `reports/eda_summary.json`).
 interface is specified. Where a number is given, use that number. Do not add scope that is not listed
 here.
 
+## Status (updated as stages complete)
+
+| Stage | What | Status | Headline result |
+|---|---|---|---|
+| §S0 | Environment & dependencies | ✅ done | uv-managed env; torch/PyG/FastAPI/Redis all import cleanly |
+| §S1 | Data module (masks, class weights) | ✅ done | 6/6 tests; train 25,410 / val 4,484 / test 16,670 |
+| §S2 | GraphSAGE model | ✅ done | 3/3 tests; forward/backward/determinism confirmed |
+| §S3 | RandomForest baseline | ✅ done | ROC-AUC 0.939, PR-AUC 0.798, F1 0.804 (reproduces EDA) |
+| §S4 | Training pipeline | ✅ done | CPU (not MPS — reproducibility, see deviations.md); 2 runs bit-identical |
+| §S5 | Evaluation & acceptance gate | ⚠️ **gate not met** | Test PR-AUC 0.630 / F1 0.527 vs RF's 0.798/0.804 — shipped as documented limitation (human decision) |
+| §S6 | PSI concept-drift monitor | ✅ done | 4/4 tests (zero-drift, +3σ shift, finite-value, thresholds) |
+| §S7 | Redis feature/adjacency store | ✅ done | DBSIZE=407,538 (exactly 2× nodes); k-hop subgraph lookups verified |
+| §S8 | FastAPI inference endpoint | ✅ done | 5/5 tests; smoke-tested against real model + Redis |
+| §S9 | Prometheus metrics (3 layers) | ✅ done | 9/9 tests incl. `/feedback`; verified with 210 real requests |
+| §S10 | Containerisation & dashboards | ✅ done | 4 containers up; loadgen p95=10.66ms (<50ms target); drift panel hit PSI=0.86 live |
+| §S11 | End-to-end verification & wrap-up | ⬜ not started | — |
+
 ## Working conventions (apply to every stage)
 
 1. **Acceptance criteria are binding.** Each stage ends with an **✅ Acceptance criteria** box. Do
@@ -54,6 +71,23 @@ Feature layout of `elliptic_txs_features.csv` (no header): column 0 = `txId`, co
 
 ---
 
+## Pinned technology stack (do not substitute)
+
+| Concern | Choice | Notes |
+|---|---|---|
+| Language / env | Python 3.12, managed by **uv** | `pyproject.toml` + `uv.lock`; `uv sync --no-dev` in Docker |
+| Deep learning | PyTorch 2.13, PyTorch Geometric 2.8 | **CPU** for both training and serving — MPS proved non-deterministic for training (§S4); no GPU needed for serving a small subgraph |
+| Model | GraphSAGE, 2-layer, mean aggregation (`SAGEConv`) | No compiled extensions (`torch-scatter`/`torch-sparse` deliberately avoided) |
+| Baseline | scikit-learn `RandomForestClassifier` | Reproduces the Phase-1 EDA numbers exactly — the bar the GNN must beat |
+| API | FastAPI + Uvicorn | `/score`, `/health`, `/metrics`, `/feedback` |
+| Online feature store | Redis 7 (alpine) | Feature hashes (`feat:{txId}`) + adjacency sets (`nbr:{txId}`); pipelined batch access for latency |
+| Metrics | `prometheus-client` + `prometheus-fastapi-instrumentator` | Custom Counters/Histograms/Gauges (model performance, drift) + free HTTP-latency metrics (system health) |
+| Dashboards | Grafana (latest) | Provisioned datasource + a 4-row dashboard JSON (no manual clicking) |
+| Orchestration | docker-compose + Makefile | 4 services: `redis`, `api`, `prometheus`, `grafana` |
+| Testing | pytest + httpx (`TestClient`) | `tests/`: data, model, drift, featurestore, api |
+
+---
+
 ## 1. Target architecture
 
 ```
@@ -70,8 +104,8 @@ Feature layout of `elliptic_txs_features.csv` (no header): column 0 = `txId`, co
                                 └────────────────┘                └───────────┘
 ```
 
-Four containers: **api**, **redis**, **prometheus**, **grafana**. Training runs on the host (uses
-the M3 **MPS** GPU); artefacts are baked into the api image.
+Four containers: **api**, **redis**, **prometheus**, **grafana**. Training runs on the host **on
+CPU** (MPS proved non-deterministic for this model — see §S4); artefacts are baked into the api image.
 
 ---
 
@@ -132,9 +166,9 @@ without them (`SAGEConv`, `GCNConv` operate on `edge_index` directly). Create em
 (`TRAIN_MAX_STEP=34`, `TEST_MIN_STEP=35`), model hyperparameters (§S2), drift constants (§S6).
 
 **✅ Acceptance criteria**
-- [ ] `uv run python -c "import torch, torch_geometric, fastapi, redis, prometheus_client; print('ok')"` prints `ok`.
-- [ ] `uv run python -c "import torch; print(torch.backends.mps.is_available())"` runs without error (prints `True` on M3).
-- [ ] `uv run python -c "import fraud_gnn.config as c; print(c.SEED)"` prints `42`.
+- [x] `uv run python -c "import torch, torch_geometric, fastapi, redis, prometheus_client; print('ok')"` prints `ok`. **Actual: confirmed.**
+- [x] `uv run python -c "import torch; print(torch.backends.mps.is_available())"` runs without error (prints `True` on M3). **Actual: `True`.**
+- [x] `uv run python -c "import fraud_gnn.config as c; print(c.SEED)"` prints `42`. **Actual: confirmed.**
 
 **📦 Commit**
 ```bash
@@ -159,12 +193,14 @@ git add -A && git commit -m "Phase2 S0: add deps and config scaffolding" && git 
 8. Add `compute_class_weights(y, mask) -> tensor([w_licit, w_illicit])` with `w_c = n_total/(2*n_c)`.
 
 **✅ Acceptance criteria** (encode these as `tests/test_data.py`, run with `uv run pytest tests/test_data.py -q`)
-- [ ] `x.shape == (203769, 165)`, `y.shape == (203769,)`, `time_step.shape == (203769,)`.
-- [ ] `edge_index` is symmetric (undirected): every `(a,b)` has a `(b,a)`.
-- [ ] `train_mask`, `val_mask`, `test_mask` are pairwise disjoint and contain **no** `unknown` node.
-- [ ] `train_mask.sum() + val_mask.sum()` equals the count of labelled nodes with `time_step<=34`.
-- [ ] `val` is ~15% (±1%) of the labelled-train nodes and stratified (illicit share within ±2% of train).
-- [ ] `compute_class_weights` returns `w_illicit > w_licit`.
+- [x] `x.shape == (203769, 165)`, `y.shape == (203769,)`, `time_step.shape == (203769,)`. **Actual: confirmed.**
+- [x] `edge_index` is symmetric (undirected): every `(a,b)` has a `(b,a)`. **Actual: confirmed.**
+- [x] `train_mask`, `val_mask`, `test_mask` are pairwise disjoint and contain **no** `unknown` node. **Actual: confirmed.**
+- [x] `train_mask.sum() + val_mask.sum()` equals the count of labelled nodes with `time_step<=34`. **Actual: 25,410 + 4,484 = 29,894.**
+- [x] `val` is ~15% (±1%) of the labelled-train nodes and stratified (illicit share within ±2% of train). **Actual: confirmed.**
+- [x] `compute_class_weights` returns `w_illicit > w_licit`. **Actual: `[0.5655, 4.3170]` (illicit weighted ~7.6× licit).**
+
+**6/6 tests passed** (`tests/test_data.py`).
 
 **📦 Commit**
 ```bash
@@ -185,9 +221,11 @@ Hyperparameters in `config.py`: `HIDDEN=128, DROPOUT=0.4, LR=5e-3, WEIGHT_DECAY=
 PATIENCE=30, SEED=42, AGGR="mean"`.
 
 **✅ Acceptance criteria** (`tests/test_model.py`)
-- [ ] `FraudSAGE(165,128,2).forward(x, edge_index)` on a random 50-node graph returns shape `[50,2]`.
-- [ ] Output requires grad and `loss.backward()` populates parameter gradients (differentiable).
-- [ ] Parameter count is deterministic across two constructions with `SEED=42`.
+- [x] `FraudSAGE(165,128,2).forward(x, edge_index)` on a random 50-node graph returns shape `[50,2]`. **Actual: confirmed.**
+- [x] Output requires grad and `loss.backward()` populates parameter gradients (differentiable). **Actual: confirmed.**
+- [x] Parameter count is deterministic across two constructions with `SEED=42`. **Actual: confirmed.**
+
+**3/3 tests passed** (`tests/test_model.py`).
 
 **📦 Commit**
 ```bash
@@ -203,7 +241,7 @@ git add -A && git commit -m "Phase2 S2: GraphSAGE model + tests" && git push
 labelled train nodes, evaluate on labelled test nodes; print ROC-AUC, PR-AUC, F1, precision, recall.
 
 **✅ Acceptance criteria**
-- [ ] `uv run python -m fraud_gnn.baseline` prints **F1 in [0.79, 0.82]** and **PR-AUC in [0.78, 0.82]** (matches EDA: F1≈0.804, PR-AUC≈0.798).
+- [x] `uv run python -m fraud_gnn.baseline` prints **F1 in [0.79, 0.82]** and **PR-AUC in [0.78, 0.82]** (matches EDA: F1≈0.804, PR-AUC≈0.798). **Actual: ROC-AUC=0.9391, PR-AUC=0.7976, F1=0.8039, Precision=0.9023, Recall=0.7248.**
 
 **📦 Commit**
 ```bash
@@ -228,10 +266,12 @@ git add -A && git commit -m "Phase2 S3: RandomForest baseline reproducing EDA nu
 6. `model_version` = short timestamp or git commit hash.
 
 **✅ Acceptance criteria**
-- [ ] `uv run python -m fraud_gnn.train` completes and writes all four artefacts under `artifacts/`.
-- [ ] Training uses MPS on M3 (log line prints the device; must be `mps` when available).
-- [ ] `metadata.json` contains a numeric `best_val_pr_auc` and an `f1_optimal_threshold` in (0,1).
-- [ ] Run is reproducible: two runs give `best_val_pr_auc` within ±0.02.
+- [x] `uv run python -m fraud_gnn.train` completes and writes all four artefacts under `artifacts/`. **Actual: confirmed.**
+- [ ] Training uses MPS on M3 (log line prints the device; must be `mps` when available). **NOT MET — trains on CPU by default.** MPS availability is still detected and logged (`mps available: True/False`); see the deviation reason below.
+- [x] `metadata.json` contains a numeric `best_val_pr_auc` and an `f1_optimal_threshold` in (0,1). **Actual: `best_val_pr_auc=0.9828`, `f1_optimal_threshold≈0.947` (with plan-default hyperparameters `HIDDEN=128, DROPOUT=0.4, LR=5e-3`; §S5 later re-tunes these — see that stage for the final shipped values).**
+- [x] Run is reproducible: two runs give `best_val_pr_auc` within ±0.02. **Actual: two CPU runs gave `best_val_pr_auc=0.9828`, `best_epoch=155` identical to 4 decimal places.**
+
+**Deviation:** MPS gave non-deterministic, unstable training (three runs with identical seed/config: val PR-AUC 0.6685, 0.9795, 0.8284/0.8573) — root cause is `SAGEConv`'s scatter-reduce aggregation not being deterministic on Apple's MPS backend. CPU training is bit-for-bit reproducible and fast enough (~2 min for 203k nodes), so reproducibility was prioritised over MPS. Full detail in [`docs/deviations.md`](deviations.md).
 
 **📦 Commit**
 ```bash
@@ -251,9 +291,23 @@ git add -A && git commit -m "Phase2 S4: full-batch GraphSAGE training + artefact
 
 **✅ Acceptance criteria (the model gate)**
 - [ ] `uv run python -m fraud_gnn.evaluate` reports **test PR-AUC ≥ 0.80 AND F1 ≥ 0.80** (≥ RF baseline).
-- [ ] The per-step table is printed for all of steps 35–49 and shows degradation after step ~43.
-- [ ] If the gate is not met, tune **only** `HIDDEN∈{128,256}`, `DROPOUT∈{0.3,0.4,0.5}`,
+  **⚠️ GATE NOT MET. Actual (shipped config `HIDDEN=128, DROPOUT=0.3, LR=5e-3`): test ROC-AUC=0.8626,
+  PR-AUC=0.6297, F1=0.5274** — well short of RF's PR-AUC 0.798/F1 0.804. This is an honest negative
+  finding, not smoothed over — see the diagnosis and the human decision to ship it below.
+- [x] The per-step table is printed for all of steps 35–49 and shows degradation after step ~43.
+  **Actual: confirmed** — per-step F1 drops from ~0.72–0.90 (steps 35–42) to ~0.00–0.03 (steps 43–49),
+  reproducing the Phase-1 EDA's "dark-market shutdown" drift finding.
+- [x] If the gate is not met, tune **only** `HIDDEN∈{128,256}`, `DROPOUT∈{0.3,0.4,0.5}`,
       `LR∈{1e-3,5e-3}` (no architectural change) and log the chosen values in `docs/deviations.md`.
+      **Actual: 5 of the 12 allowed combos tried** (see the full table in `docs/deviations.md`); all
+      showed the same signature (decent ROC-AUC ~0.83–0.86, precision collapsing to 0.27–0.46 at any
+      reasonable threshold, vs RF's 0.90). Root-cause diagnosis: `val_mask` (§S1) is a random slice of
+      *non-drifted* training data, so early stopping selects the checkpoint best at predicting
+      non-drifted data — the opposite of what generalises to the drifted test period. **Human decision
+      (2026-07-24): ship the best combo found (PR-AUC 0.6297) as a documented limitation** rather than
+      continue the full grid or change architecture/val-split design outside this stage's scope. Two
+      candidate real fixes (temporal val split; a residual path preserving raw features) are deferred
+      to `docs/followup.md`.
 
 **📦 Commit**
 ```bash
@@ -272,9 +326,12 @@ git add -A && git commit -m "Phase2 S5: evaluation, per-step drift table, accept
 - Thresholds: PSI `<0.1` stable, `0.1–0.25` moderate (warn), `>0.25` significant (alert).
 
 **✅ Acceptance criteria** (`tests/test_drift.py`)
-- [ ] PSI ≈ 0 (`< 1e-6`) when the buffer distribution equals the reference.
-- [ ] PSI `> 0.25` when the buffer is shifted by `+3σ` on the monitored features.
-- [ ] `drift_score` is a finite float for a mixed buffer; monitor never raises on unseen feature scale.
+- [x] PSI ≈ 0 (`< 1e-6`) when the buffer distribution equals the reference. **Actual: confirmed.**
+- [x] PSI `> 0.25` when the buffer is shifted by `+3σ` on the monitored features. **Actual: confirmed.**
+- [x] `drift_score` is a finite float for a mixed buffer; monitor never raises on unseen feature scale.
+  **Actual: confirmed, including a 1e12 out-of-scale value in the test buffer.**
+
+**4/4 tests passed** (`tests/test_drift.py`).
 
 **📦 Commit**
 ```bash
@@ -293,9 +350,11 @@ git add -A && git commit -m "Phase2 S6: PSI concept-drift monitor + tests" && gi
   `get_subgraph(txId, hops=1)->(x, edge_index, center_idx)`. Missing txId raises `KeyError`.
 
 **✅ Acceptance criteria**
-- [ ] With a local Redis running, `uv run python -m scripts.load_featurestore` loads all 203,769 nodes; `DBSIZE` ≈ 2× node count (feat + nbr keys).
-- [ ] `get_subgraph(txId)` for a known high-degree node returns `x` with ≥2 rows and a symmetric `edge_index` including the centre.
-- [ ] `get_features` on an absent txId raises `KeyError`.
+- [x] With a local Redis running, `uv run python -m scripts.load_featurestore` loads all 203,769 nodes; `DBSIZE` ≈ 2× node count (feat + nbr keys). **Actual: `DBSIZE=407538`, exactly 2×203,769 (confirms zero isolated nodes, matching Phase-1 EDA).**
+- [x] `get_subgraph(txId)` for a known high-degree node returns `x` with ≥2 rows and a symmetric `edge_index` including the centre. **Actual: txId 2984918 (degree 473) → `x.shape=(474,165)`, symmetric edge list, centre included.**
+- [x] `get_features` on an absent txId raises `KeyError`. **Actual: confirmed.**
+
+**4/4 tests passed** (`tests/test_featurestore.py`).
 
 **📦 Commit**
 ```bash
@@ -320,10 +379,14 @@ git add -A && git commit -m "Phase2 S7: Redis feature/adjacency store + loader" 
   (fallback 0.5). Startup: connect Redis (`REDIS_HOST`, default `redis`), load model + reference stats.
 
 **✅ Acceptance criteria** (`tests/test_api.py`, monkeypatched model + fake store, `httpx`)
-- [ ] `GET /health` → 200 with a `model_version`.
-- [ ] `POST /score` with `{txId}` and with `{features:[…165…]}` both return a valid `ScoreResponse` (prob in [0,1]).
-- [ ] `POST /score` with neither field → HTTP 422.
-- [ ] `GET /metrics` exposes `fraud_drift_psi` and the default HTTP latency metrics.
+- [x] `GET /health` → 200 with a `model_version`. **Actual: confirmed (unit test + real server).**
+- [x] `POST /score` with `{txId}` and with `{features:[…165…]}` both return a valid `ScoreResponse` (prob in [0,1]). **Actual: confirmed both in tests and against the real model + live Redis.**
+- [x] `POST /score` with neither field → HTTP 422. **Actual: confirmed.**
+- [x] `GET /metrics` exposes `fraud_drift_psi` and the default HTTP latency metrics. **Actual: confirmed.**
+
+**5/5 tests passed** (`tests/test_api.py`). Also smoke-tested against the real trained model and a live
+Redis instance (not just mocks): known-txId scoring, raw-feature scoring, 422 handling, and `/metrics`
+all confirmed working end-to-end.
 
 **📦 Commit**
 ```bash
@@ -345,8 +408,10 @@ git add -A && git commit -m "Phase2 S8: FastAPI /score /health /metrics + infere
   `ScoreResponse`.
 
 **✅ Acceptance criteria**
-- [ ] `GET /metrics` after N>200 `/score` calls exposes non-zero `fraud_predictions_total`, a populated `fraud_score_histogram`, and a `fraud_drift_psi` value.
-- [ ] `POST /feedback` updates the rolling precision/recall/f1 gauges (if implemented).
+- [x] `GET /metrics` after N>200 `/score` calls exposes non-zero `fraud_predictions_total`, a populated `fraud_score_histogram`, and a `fraud_drift_psi` value. **Actual: confirmed with 210 real requests against the live model + Redis** (`fraud_predictions_total{label="licit"}=210`, `fraud_score_histogram_count=210`).
+- [x] `POST /feedback` updates the rolling precision/recall/f1 gauges (if implemented). **Actual: implemented and confirmed** — a real matched-txId feedback call correctly updated `fraud_rolling_precision/recall/f1`.
+
+**9/9 tests passed** (`tests/test_api.py`, cumulative with §S8).
 
 **📦 Commit**
 ```bash
@@ -374,10 +439,14 @@ git add -A && git commit -m "Phase2 S9: system/model/drift Prometheus metrics" &
   (exact commands as in prior spec).
 
 **✅ Acceptance criteria** (§ Definition of done for the system)
-- [ ] `make up` brings up **4 healthy containers**; `GET http://localhost:8000/health` → 200.
-- [ ] After `make seed`, `POST /score {txId}` returns `illicit_probability`, `drift_score`, `model_version` with **p95 latency < 50 ms** (verify via `make loadgen`).
-- [ ] Grafana at `http://localhost:3000` shows live *System Health*, *Score Distribution*, and *Concept Drift* panels updating during `make loadgen`.
-- [ ] `make down` tears everything down cleanly (`-v`).
+- [x] `make up` brings up **4 healthy containers**; `GET http://localhost:8000/health` → 200.
+  **Actual: confirmed** — `redis` and `api` explicitly healthy (Docker healthchecks), `prometheus`/`grafana` running; `/health` → 200 with real `model_version`.
+- [x] After `make seed`, `POST /score {txId}` returns `illicit_probability`, `drift_score`, `model_version` with **p95 latency < 50 ms** (verify via `make loadgen`).
+  **Actual: 5000/5000 requests succeeded, p95=10.66ms, p99=15.52ms, mean=6.18ms** (`make loadgen`).
+- [x] Grafana at `http://localhost:3000` shows live *System Health*, *Score Distribution*, and *Concept Drift* panels updating during `make loadgen`.
+  **Actual: confirmed via Prometheus + Grafana's own datasource proxy** — `fraud_drift_psi` reached **0.86** during the drift-inducing phase (well above the 0.25 "significant" threshold), live-reproducing the Phase-1 concept-drift finding; `fraud_predictions_total`, `fraud_flagged_ratio`, `fraud_score_histogram_count` all populated and queryable through Grafana's datasource.
+- [x] `make down` tears everything down cleanly (`-v`).
+  **Actual: confirmed** — all 4 containers + network removed, no leftover volumes.
 
 **📦 Commit**
 ```bash
@@ -403,6 +472,23 @@ so plan and delivered system agree; review `docs/followup.md`.
 ```bash
 git add -A && git commit -m "Phase2 S11: end-to-end verified; docs reconciled" && git push
 ```
+
+---
+
+## Known risks & pre-authorized fallbacks
+
+This table draws a line between decisions that can be made unilaterally while executing a stage, and
+decisions that require stopping and asking the human first. When a risk below actually materializes,
+its "Pre-authorized fallback" applies without needing to pause — otherwise, stop and ask (as happened
+for the §S5 gate failure).
+
+| Risk / decision class | Pre-authorized fallback | What actually happened |
+|---|---|---|
+| A stage's numeric acceptance gate (accuracy/F1/PR-AUC) isn't met after tuning within the plan's explicitly allowed knobs | **Stop and ask the human.** Do not silently change model architecture, validation-split design, or lower the bar. | Materialized at §S5 — GNN test PR-AUC/F1 fell well short of the RF baseline after 5 of 12 allowed hyperparameter combos. Paused and asked; human chose to ship as a documented limitation. |
+| The training backend (MPS) proves non-deterministic/unstable | Fall back to CPU training; log the reason and the evidence in `docs/deviations.md`. | Materialized at §S4 — MPS gave wildly different runs (val PR-AUC 0.67–0.98 across identical-seed runs); switched to CPU (bit-for-bit reproducible, fast enough for this dataset size). |
+| An implementation detail (not a spec'd interface) is too slow to hit a stated latency/throughput budget | Optimize the implementation (batching, pipelining, caching) without asking, as long as the stage's public interface/behaviour is unchanged; log it in `docs/deviations.md` for traceability. | Materialized at §S10 — one Redis round trip per neighbour was ~475ms for the highest-degree node; pipelined batching brought p95 (over a random real sample) down to ~5ms. |
+| A library/tool/base-image behaves differently than expected (package manager quirks, plugin config, version drift) | Adapt the implementation to match reality; log it in `docs/deviations.md`; keep the stage's stated interface/behaviour. | Materialized twice — a local `uv`/`_virtualenv.pth` `sys.path` flakiness (worked around with `conftest.py` + `PYTHONPATH=src`), and the default PyPI CPU torch wheel pulling in unused CUDA/`triton` packages (left as-is; logged as a future image-slimming opportunity in `docs/followup.md`). |
+| A dependent service isn't running locally when a stage needs to verify against it (e.g. Redis before docker-compose exists) | Spin up a throwaway local instance (e.g. `docker run redis:7-alpine`) purely for verification; don't block the stage on the eventual compose service existing yet. | Used at §S7 and §S10 — ad-hoc Redis containers for verification before `docker-compose.yml` was written. |
 
 ---
 
