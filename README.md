@@ -55,8 +55,12 @@ technical detail lives in [`docs/plan.md`](docs/plan.md) and the code.
 - **Dataset:** [Elliptic](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set) —
   203,769 transactions (nodes), 234,355 payment edges, 49 time steps, 166 anonymised features.
 - **Environment:** Apple Silicon (M3), Python 3.12, [uv](https://github.com/astral-sh/uv) for deps.
-- **Docs:** [`docs/plan.md`](docs/plan.md) (build spec) · [`docs/deviations.md`](docs/deviations.md)
-  (changes from plan) · [`docs/followup.md`](docs/followup.md) (future work / out of scope).
+- **Docs:** [`docs/plan.md`](docs/plan.md) (build spec **and** live status/results) ·
+  [`docs/deviations.md`](docs/deviations.md) (changes from plan) ·
+  [`docs/followup.md`](docs/followup.md) (future work / out of scope).
+- **Status:** Phase 1 (EDA) ✅ and Phase 2 (implementation) ✅ both complete. The GNN is built, tested,
+  containerised, and monitored — but does **not** beat the Phase-1 RF baseline on test data (see
+  Phase 2 below for the honest result and diagnosis).
 
 ## Phase 1 — Exploratory Data Analysis ✅ (this phase)
 
@@ -77,12 +81,74 @@ technical detail lives in [`docs/plan.md`](docs/plan.md) and the code.
 A Random-Forest baseline on the temporal split reaches **ROC-AUC 0.94 / PR-AUC 0.80 / F1 0.80** —
 the bar the Phase-2 GNN must beat.
 
-## Phase 2 — Implementation ⏳ (see [`docs/plan.md`](docs/plan.md))
+## Phase 2 — Implementation ✅ (see [`docs/plan.md`](docs/plan.md))
 
-GraphSAGE model → FastAPI real-time `/score` endpoint → Redis feature store → Prometheus + Grafana
-monitoring (system health, model performance, concept drift), all via `docker-compose`.
+Real-time architecture: a GraphSAGE model (PyTorch/PyTorch Geometric) served behind a FastAPI
+`/score` endpoint, backed by a Redis feature/adjacency store, all containerised with
+`docker-compose`, plus Prometheus + Grafana monitoring across three layers (system health, model
+performance, concept drift). Every stage's plan, acceptance criteria, and **actual measured
+results** are recorded live in [`docs/plan.md`](docs/plan.md) — it doubles as the project's
+build log, not just a prospective spec.
 
-## Quickstart (Phase 1)
+### Model result — an honest negative finding
+
+The GraphSAGE model does **not** beat the Phase-1 Random-Forest baseline on the held-out (temporal)
+test set:
+
+| Metric | RF baseline (Phase 1) | GraphSAGE (shipped) |
+|---|---|---|
+| ROC-AUC | 0.939 | 0.863 |
+| PR-AUC | 0.798 | **0.630** |
+| F1 | 0.804 | **0.527** |
+
+We diagnosed *why*, rather than just accepting it: the validation split used for early stopping is a
+random slice of **non-drifted** training-period data (deliberately, to avoid the drift zone at
+design time) — so the checkpoint that gets selected is the one best at predicting normal conditions,
+which turns out to be the *opposite* of what generalises to the drift-affected test period. Every
+hyperparameter combination tried reaches validation PR-AUC ≈0.98 while test PR-AUC stays in the
+0.29–0.63 range — a signature consistent with this explanation, not plain overfitting fixable by
+dropout or learning rate. Five of the twelve allowed tuning combinations were tried without closing
+the gap. The decision — made explicitly, not silently — was to ship this as a **documented
+limitation** rather than open-ended architecture or validation-design work. Full diagnosis, every
+combination tried, and two concrete candidate fixes (a temporal validation split; a residual
+connection so the model can't dilute the strong local features found in Phase 1) are in
+[`docs/deviations.md`](docs/deviations.md) and [`docs/followup.md`](docs/followup.md).
+
+This is a deliberately honest result, reported the way it happened: a tabular baseline beating a GNN
+under distribution shift is a real and useful finding in its own right, not a failure to hide.
+
+### The live service
+
+`docker-compose` brings up four containers:
+- **api** — FastAPI, serving `/score` (real-time fraud probability), `/health`, `/metrics`, `/feedback`
+- **redis** — online feature + adjacency store (per-transaction features and 1-hop neighbours,
+  pipelined for low latency)
+- **prometheus** — scrapes system-health, model-performance, and concept-drift metrics every 5s
+- **grafana** — a fully provisioned dashboard (no manual setup): *System Health*, *Prediction Volume
+  & Score Distribution*, *Concept Drift*, *Model Performance*
+
+**Verified end-to-end** on a full clean rehearsal (`make setup && make train && make eval && make up
+&& make seed && make loadgen` — not just described, actually run; see `docs/plan.md` §S10/§S11):
+- **5,000 real `/score` requests: 0 errors, p95 latency = 11.5ms** (target: <50ms).
+- The load generator's drift-inducing phase (feeding real post-dark-market-shutdown transactions)
+  pushed the live drift score to **PSI = 0.86** — well past the "significant" alert threshold (0.25),
+  reproducing the Phase-1 concept-drift finding live, on the running dashboard.
+
+### Quickstart (Phase 2)
+
+```bash
+make setup                    # uv sync
+make train && make eval       # train the GNN, print final test metrics
+make up                       # docker compose up --build -d (4 containers)
+make seed                     # load the Elliptic graph into Redis
+make loadgen                  # send 5,000 test requests, verify p95 latency
+# Grafana:    http://localhost:3000  (dashboards provisioned automatically)
+# Prometheus: http://localhost:9090
+# API:        http://localhost:8000/docs
+make down                     # tear everything down
+```
+
+## Quickstart (Phase 1 — EDA)
 
 ```bash
 uv sync                                   # install environment

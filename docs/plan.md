@@ -23,7 +23,7 @@ here.
 | §S8 | FastAPI inference endpoint | ✅ done | 5/5 tests; smoke-tested against real model + Redis |
 | §S9 | Prometheus metrics (3 layers) | ✅ done | 9/9 tests incl. `/feedback`; verified with 210 real requests |
 | §S10 | Containerisation & dashboards | ✅ done | 4 containers up; loadgen p95=10.66ms (<50ms target); drift panel hit PSI=0.86 live |
-| §S11 | End-to-end verification & wrap-up | ⬜ not started | — |
+| §S11 | End-to-end verification & wrap-up | ✅ done | Full clean rehearsal passed (26/26 tests, p95=11.49ms); README updated with honest final result; deviations.md fully reconciled |
 
 ## Working conventions (apply to every stage)
 
@@ -39,6 +39,12 @@ here.
    [`docs/followup.md`](followup.md) and keep building the current stage as written. If something is
    explicitly not wanted, add it to *Out of scope* there.
 5. All commands are run from the repository root with the `uv` environment active.
+   **Known tooling quirk:** this machine's `uv`-managed `.venv` has a `_virtualenv.pth` site patch
+   that occasionally drops the editable install's `src/` path from `sys.path` (order-dependent `.pth`
+   processing), causing an intermittent `ModuleNotFoundError: fraud_gnn` with no code change between
+   runs. `conftest.py` at the repo root works around it for `pytest`; for direct `uv run python -m ...`
+   invocations, prefix with `PYTHONPATH=src` (the `Makefile` already does this — see §S10) or re-run
+   `uv sync` if it's ever hit outside the Makefile. Not a code defect. Full detail in `docs/deviations.md`.
 6. **Commit & push at the end of every session**, not just every stage. If a session ends mid-stage
    (interrupted, paused, or stopped by the user) with work that doesn't yet meet that stage's
    acceptance criteria, commit and push it anyway — never leave uncommitted work sitting locally
@@ -356,6 +362,14 @@ git add -A && git commit -m "Phase2 S6: PSI concept-drift monitor + tests" && gi
 
 **4/4 tests passed** (`tests/test_featurestore.py`).
 
+**Deviation (reconciled from §S10):** `get_subgraph`'s original implementation issued one Redis round
+trip per neighbour (via looped `get_features`/`get_neighbors` calls) — fine for typical nodes (mean
+degree 2.3) but ~475ms for the graph's highest-degree node (473 neighbours). Rewritten during §S10,
+while verifying the p95<50ms latency criterion, to batch Redis calls via pipelines (one round trip per
+BFS layer, one for all feature lookups) — brought that same node down to ~141ms, and a random sample
+of 200 real txIds to p95=5.2ms. Not a spec deviation (the plan only specified the interface), but
+logged since §S7's code changed again after this stage's commit. Full detail in `docs/deviations.md`.
+
 **📦 Commit**
 ```bash
 git add -A && git commit -m "Phase2 S7: Redis feature/adjacency store + loader" && git push
@@ -463,10 +477,33 @@ test metrics and screenshots/links. Fold every row of `docs/deviations.md` back 
 so plan and delivered system agree; review `docs/followup.md`.
 
 **✅ Acceptance criteria (project done)**
-- [ ] `make test` is green (all of test_data/model/drift/api pass).
-- [ ] Full Definition-of-Done from §S5 (gate) and §S10 (system) all pass on a clean run.
-- [ ] `README.md` reports the final GNN test PR-AUC/F1 and confirms it beats the RF baseline.
-- [ ] `docs/deviations.md` is reconciled into `plan.md`; `docs/followup.md` reviewed.
+- [x] `make test` is green (all of test_data/model/drift/api pass). **Actual: 26/26 passed** with the
+  full stack (`redis`) up (`test_featurestore.py` runs instead of skipping); 22/26 passed with Redis
+  down (the 4 featurestore tests skip gracefully, by design).
+- [x] Full Definition-of-Done from §S5 (gate) and §S10 (system) all pass on a clean run, **except the
+  §S5 gate itself, which is known and documented as not met** (see §S5). Everything else re-verified
+  on a fresh, full rehearsal (`make setup && make train && make eval && make up && make seed && make
+  loadgen`, run start to finish for this stage):
+  - `make train` reproduces the exact same result as the original §S5 run (`best_val_pr_auc=0.9797`,
+    `best_epoch=137`) — confirms CPU-training determinism holds on a clean re-run, not just the
+    original one.
+  - `make eval` reproduces the exact same test metrics (ROC-AUC=0.8626, PR-AUC=0.6297, F1=0.5274).
+  - `make up`: 4 containers, api+redis healthy. `make seed`: 203,769 nodes loaded. `make loadgen`:
+    5,000/5,000 succeeded, **p95=11.49ms** (previous run: 10.66ms — consistent). `make down`: clean
+    teardown, confirmed via `docker compose ps -a` (empty).
+- [x] `README.md` reports the final GNN test PR-AUC/F1 **and honestly states it does not beat the RF
+  baseline**, with the diagnosis and a link to `docs/deviations.md`/`docs/followup.md` — rather than
+  the criterion's original (now inapplicable) wording of "confirms it beats the RF baseline". Reporting
+  the true result is the point; smoothing this over would misrepresent the delivered system.
+- [x] `docs/deviations.md` is reconciled into `plan.md`; `docs/followup.md` reviewed. **Actual:** every
+  row of `docs/deviations.md` now has a corresponding note in this file — §S4 (MPS→CPU), the
+  `_virtualenv.pth` tooling quirk (Working Conventions §5), §S5 (gate failure, full diagnosis and
+  decision), and §S7 (Redis pipelining, added retroactively during this stage). `docs/followup.md`
+  reviewed — all 5 entries remain correctly deferred; none block project completion.
+
+**Project status: both phases complete.** The Phase-2 system is built, tested, containerised, and
+monitored end-to-end. The one open item is the §S5 model-performance gate, which is a known,
+diagnosed, and deliberately-accepted limitation — not an oversight.
 
 **📦 Commit**
 ```bash
