@@ -31,7 +31,7 @@ def get_device() -> torch.device:
     scatter-reduce ops are non-deterministic on the MPS backend) — two runs varied from
     val PR-AUC 0.67 to 0.98, even with `torch.use_deterministic_algorithms(warn_only=True)`.
     CPU is bit-for-bit reproducible here and full-batch training on this graph size
-    (203k nodes) still completes in under two minutes. See docs/deviations.md.
+    (203k nodes) still completes in under two minutes. See docs/plan.md §S4.
     Set FRAUD_GNN_FORCE_MPS_TRAIN=1 to override (non-deterministic; not recommended).
     """
     mps_available = torch.backends.mps.is_available()
