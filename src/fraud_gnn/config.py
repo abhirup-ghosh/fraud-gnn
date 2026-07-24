@@ -54,3 +54,8 @@ DRIFT_PSI_ALERT = 0.25
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 DEFAULT_THRESHOLD = 0.5
+
+# Monitoring metrics (§S9)
+FLAGGED_RATIO_WINDOW = 1000  # rolling share of predictions flagged illicit
+FEEDBACK_WINDOW = 1000  # rolling precision/recall/f1 over confirmed predictions
+RECENT_PREDICTIONS_CACHE_SIZE = 5000  # txId -> predicted label, for /feedback correlation

@@ -69,3 +69,61 @@ def test_metrics_exposes_drift_and_http_latency(client):
     assert resp.status_code == 200
     assert "fraud_drift_psi" in resp.text
     assert "http_request_duration_seconds" in resp.text
+
+
+def _metric_value(text: str, pattern: str) -> float:
+    import re
+
+    match = re.search(re.escape(pattern) + r" ([0-9.eE+-]+)", text)
+    assert match, f"metric line matching {pattern!r} not found"
+    return float(match.group(1))
+
+
+def test_metrics_after_many_scores_exposes_model_performance_metrics(client):
+    before = client.get("/metrics").text
+    count_before = _metric_value(before, 'fraud_predictions_total{label="licit"}')
+    hist_before = _metric_value(before, "fraud_score_histogram_count")
+
+    n_calls = 210  # > 200, matching §S9's acceptance criterion
+    for _ in range(n_calls):
+        client.post("/score", json={"features": [0.0] * 165})  # FakeEngine -> 0.3 -> licit
+
+    after = client.get("/metrics").text
+    count_after = _metric_value(after, 'fraud_predictions_total{label="licit"}')
+    hist_after = _metric_value(after, "fraud_score_histogram_count")
+
+    assert count_after - count_before == n_calls
+    assert hist_after - hist_before == n_calls
+    assert "fraud_flagged_ratio" in after
+    assert "fraud_drift_psi" in after
+
+
+def test_feedback_matched_prediction_updates_rolling_metrics(client):
+    client.post("/score", json={"txId": 42})  # FakeEngine.score_known -> 0.7 -> illicit
+
+    resp = client.post("/feedback", json={"txId": 42, "true_label": "illicit"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["matched"] is True
+    assert body["rolling_precision"] == 1.0
+    assert body["rolling_recall"] == 1.0
+    assert body["rolling_f1"] == 1.0
+
+    metrics_text = client.get("/metrics").text
+    assert "fraud_rolling_precision 1.0" in metrics_text
+
+
+def test_feedback_unmatched_txid_returns_matched_false(client):
+    resp = client.post("/feedback", json={"txId": 999999, "true_label": "licit"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "matched": False,
+        "rolling_precision": None,
+        "rolling_recall": None,
+        "rolling_f1": None,
+    }
+
+
+def test_feedback_invalid_label_returns_422(client):
+    resp = client.post("/feedback", json={"txId": 1, "true_label": "fraud"})
+    assert resp.status_code == 422

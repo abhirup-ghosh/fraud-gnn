@@ -30,3 +30,21 @@ class ScoreResponse(BaseModel):
     model_version: str
     latency_ms: float
     drift_score: float
+
+
+class FeedbackRequest(BaseModel):
+    txId: int
+    true_label: str
+
+    @model_validator(mode="after")
+    def check_label(self):
+        if self.true_label not in ("illicit", "licit"):
+            raise ValueError('true_label must be "illicit" or "licit"')
+        return self
+
+
+class FeedbackResponse(BaseModel):
+    matched: bool
+    rolling_precision: float | None = None
+    rolling_recall: float | None = None
+    rolling_f1: float | None = None

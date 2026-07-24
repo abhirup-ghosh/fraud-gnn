@@ -1,19 +1,23 @@
-"""FastAPI real-time fraud-scoring service: /score, /health, /metrics."""
+"""FastAPI real-time fraud-scoring service: /score, /health, /metrics, /feedback."""
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from prometheus_client import Gauge
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from fraud_gnn import config as cfg
 from fraud_gnn.drift import DriftMonitor
 from fraud_gnn.featurestore import get_features, get_redis_client
 from fraud_gnn.serve.inference import InferenceEngine
-from fraud_gnn.serve.schemas import ScoreRequest, ScoreResponse
-
-fraud_drift_psi = Gauge(
-    "fraud_drift_psi", "Mean PSI drift score over the top Phase-1 EDA features"
+from fraud_gnn.serve.metrics import (
+    PredictionTracker,
+    fraud_drift_psi,
+    fraud_score_histogram,
+)
+from fraud_gnn.serve.schemas import (
+    FeedbackRequest,
+    FeedbackResponse,
+    ScoreRequest,
+    ScoreResponse,
 )
 
 state: dict = {}
@@ -24,6 +28,7 @@ async def lifespan(app: FastAPI):
     state["engine"] = InferenceEngine()
     state["redis_client"] = get_redis_client()
     state["drift_monitor"] = DriftMonitor()
+    state["tracker"] = PredictionTracker()
     state["start_time"] = time.time()
     yield
     state.clear()
@@ -60,8 +65,13 @@ def score(req: ScoreRequest):
     drift_monitor.add(feature_dict)
     fraud_drift_psi.set(drift_monitor.drift_score)
 
-    label = "illicit" if proba >= engine.threshold else "licit"
+    is_illicit = proba >= engine.threshold
+    label = "illicit" if is_illicit else "licit"
     latency_ms = (time.time() - start) * 1000
+
+    fraud_score_histogram.observe(proba)
+    tracker: PredictionTracker = state["tracker"]
+    tracker.record_prediction(is_illicit, tx_id=req.txId)
 
     return ScoreResponse(
         txId=req.txId,
@@ -71,4 +81,18 @@ def score(req: ScoreRequest):
         model_version=engine.model_version,
         latency_ms=latency_ms,
         drift_score=drift_monitor.drift_score,
+    )
+
+
+@app.post("/feedback", response_model=FeedbackResponse)
+def feedback(req: FeedbackRequest):
+    tracker: PredictionTracker = state["tracker"]
+    matched = tracker.record_feedback(req.txId, req.true_label == "illicit")
+    if not matched:
+        return FeedbackResponse(matched=False)
+    return FeedbackResponse(
+        matched=True,
+        rolling_precision=tracker.precision,
+        rolling_recall=tracker.recall,
+        rolling_f1=tracker.f1,
     )
